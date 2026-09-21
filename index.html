@@ -558,31 +558,48 @@ function applyControlsToTemplate() {
   box.color = document.getElementById("propColor").value;
 }
 
-async function buildLabelCanvas(row, withGuides = false) {
+async function buildLabelLayers(row) {
   const key = normalize(row.modelo);
   const tpl = templates[key];
   if (!tpl) throw new Error("Modelo inválido: " + row.modelo);
 
-  const canvas = document.createElement("canvas");
-  canvas.width = tpl.width;
-  canvas.height = tpl.height;
-  const ctx = canvas.getContext("2d");
+  const backgroundCanvas = document.createElement("canvas");
+  backgroundCanvas.width = tpl.width;
+  backgroundCanvas.height = tpl.height;
+  const backgroundCtx = backgroundCanvas.getContext("2d");
 
   const baseImg = await loadImage(tpl.src);
-  ctx.drawImage(baseImg, 0, 0, tpl.width, tpl.height);
-  drawCorrectedCnpj(ctx, key);
+  backgroundCtx.drawImage(baseImg, 0, 0, tpl.width, tpl.height);
+  drawCorrectedCnpj(backgroundCtx, key);
 
-  fitAndDrawText(ctx, row.descricao, tpl.areas.description);
-  fitAndDrawText(ctx, row.quantidade, tpl.areas.quantity);
-  fitAndDrawText(ctx, row.codigo, tpl.areas.codeText);
+  const contentCanvas = document.createElement("canvas");
+  contentCanvas.width = tpl.width;
+  contentCanvas.height = tpl.height;
+  const contentCtx = contentCanvas.getContext("2d");
+
+  fitAndDrawText(contentCtx, row.descricao, tpl.areas.description);
+  fitAndDrawText(contentCtx, row.quantidade, tpl.areas.quantity);
+  fitAndDrawText(contentCtx, row.codigo, tpl.areas.codeText);
 
   if (row.valor_barra) {
     const barcodeUrl = generateBarcodeDataUrl(String(row.valor_barra), String(row.tipo_barra).toUpperCase(), tpl.areas.barcode.w, tpl.areas.barcode.h);
     const barcodeImg = await loadImage(barcodeUrl);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(tpl.areas.barcode.x, tpl.areas.barcode.y, tpl.areas.barcode.w, tpl.areas.barcode.h);
-    ctx.drawImage(barcodeImg, tpl.areas.barcode.x, tpl.areas.barcode.y, tpl.areas.barcode.w, tpl.areas.barcode.h);
+    contentCtx.fillStyle = "#ffffff";
+    contentCtx.fillRect(tpl.areas.barcode.x, tpl.areas.barcode.y, tpl.areas.barcode.w, tpl.areas.barcode.h);
+    contentCtx.drawImage(barcodeImg, tpl.areas.barcode.x, tpl.areas.barcode.y, tpl.areas.barcode.w, tpl.areas.barcode.h);
   }
+
+  return { backgroundCanvas, contentCanvas, tpl, key };
+}
+
+async function buildLabelCanvas(row, withGuides = false) {
+  const { backgroundCanvas, contentCanvas, tpl } = await buildLabelLayers(row);
+  const canvas = document.createElement("canvas");
+  canvas.width = tpl.width;
+  canvas.height = tpl.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(backgroundCanvas, 0, 0);
+  ctx.drawImage(contentCanvas, 0, 0);
 
   if (withGuides) {
     drawGuide(ctx, tpl.areas.description, "#ff5757");
@@ -608,19 +625,26 @@ async function makePdf(rows, filename) {
   let pdf = null;
 
   for (let i = 0; i < rows.length; i++) {
-    const { canvas, tpl } = await buildLabelCanvas(rows[i], false);
+    const { backgroundCanvas, contentCanvas, tpl, key } = await buildLabelLayers(rows[i]);
     const orientation = tpl.width >= tpl.height ? "landscape" : "portrait";
     if (!pdf) {
       pdf = new jsPDF({
         orientation,
         unit: "px",
-        format: [tpl.width, tpl.height]
+        format: [tpl.width, tpl.height],
+        compress: true,
+        putOnlyUsedFonts: true
       });
     } else {
       pdf.addPage([tpl.width, tpl.height], orientation);
       pdf.setPage(i + 1);
     }
-    pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, tpl.width, tpl.height);
+    // A arte de fundo é idêntica nas etiquetas do mesmo modelo. O alias faz o
+    // jsPDF gravá-la uma única vez no arquivo, mantendo a imagem em PNG sem perda.
+    pdf.addImage(backgroundCanvas, "PNG", 0, 0, tpl.width, tpl.height, "fundo-" + key, "FAST");
+    // Apenas os dados variáveis (texto e código de barras) são adicionados por página.
+    // Como a camada permanece em PNG, a nitidez continua exatamente a mesma.
+    pdf.addImage(contentCanvas, "PNG", 0, 0, tpl.width, tpl.height, "dados-" + i, "FAST");
   }
 
   pdf.save(filename);
